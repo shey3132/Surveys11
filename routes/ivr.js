@@ -1,5 +1,5 @@
 const express = require('express');
-const { admin, db } = require('../db');
+const { db, FieldValue } = require('../db');
 const { normalizePhone, getQuestionsWithOptions } = require('./admin');
 
 const router = express.Router();
@@ -122,7 +122,7 @@ router.all('/survey', async (req, res) => {
       await responseRef.create({
         surveyId,
         userPhone: phone,
-        submittedAt: admin.firestore.FieldValue.serverTimestamp(),
+        submittedAt: FieldValue.serverTimestamp(),
         answers: answerPairs
       });
     } catch (err) {

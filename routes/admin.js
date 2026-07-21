@@ -1,7 +1,7 @@
 const express = require('express');
 const multer = require('multer');
 const xlsx = require('xlsx');
-const { admin, db } = require('../db');
+const { db, FieldValue } = require('../db');
 
 const router = express.Router();
 const upload = multer({ storage: multer.memoryStorage() });
@@ -77,7 +77,7 @@ router.post('/users/upload', upload.single('file'), async (req, res) => {
         batch.set(ref, {
           phone: u.phone,
           name: u.name || null,
-          createdAt: admin.firestore.FieldValue.serverTimestamp()
+          createdAt: FieldValue.serverTimestamp()
         });
       });
       await batch.commit();
@@ -156,7 +156,7 @@ router.post('/surveys', async (req, res) => {
       title,
       description: description || null,
       status: 'draft',
-      createdAt: admin.firestore.FieldValue.serverTimestamp(),
+      createdAt: FieldValue.serverTimestamp(),
       activatedAt: null,
       closedAt: null
     });
@@ -238,10 +238,10 @@ router.post('/surveys/:id/activate', async (req, res) => {
     const batch = db.batch();
     activeSnap.docs.forEach(d => {
       if (d.id !== req.params.id) {
-        batch.update(d.ref, { status: 'closed', closedAt: admin.firestore.FieldValue.serverTimestamp() });
+        batch.update(d.ref, { status: 'closed', closedAt: FieldValue.serverTimestamp() });
       }
     });
-    batch.update(surveyRef, { status: 'active', activatedAt: admin.firestore.FieldValue.serverTimestamp() });
+    batch.update(surveyRef, { status: 'active', activatedAt: FieldValue.serverTimestamp() });
     await batch.commit();
   } catch (err) {
     return res.status(500).json({ error: 'שגיאה בהפעלת הסקר', details: err.message });
@@ -256,7 +256,7 @@ router.post('/surveys/:id/close', async (req, res) => {
   const surveyDoc = await surveyRef.get();
   if (!surveyDoc.exists) return res.status(404).json({ error: 'סקר לא נמצא' });
 
-  await surveyRef.update({ status: 'closed', closedAt: admin.firestore.FieldValue.serverTimestamp() });
+  await surveyRef.update({ status: 'closed', closedAt: FieldValue.serverTimestamp() });
 
   res.json(await getFullSurvey(req.params.id));
 });

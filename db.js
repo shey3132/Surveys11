@@ -1,4 +1,5 @@
-const admin = require('firebase-admin');
+const { initializeApp, cert } = require('firebase-admin/app');
+const { getFirestore, FieldValue } = require('firebase-admin/firestore');
 
 // The service account key (downloaded from Firebase Console → Project Settings →
 // Service Accounts → Generate new private key) needs to be provided as an
@@ -19,10 +20,10 @@ try {
   throw new Error('FIREBASE_SERVICE_ACCOUNT is not valid JSON — paste the key file content exactly as downloaded.');
 }
 
-admin.initializeApp({
-  credential: admin.credential.cert(serviceAccount)
+const app = initializeApp({
+  credential: cert(serviceAccount)
 });
 
-const db = admin.firestore();
+const db = getFirestore(app);
 
-module.exports = { admin, db };
+module.exports = { db, FieldValue };
