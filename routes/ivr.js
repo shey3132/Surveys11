@@ -30,14 +30,13 @@ function buildReadCommand(text, varName) {
 }
 
 function buildMessage(text) {
-  // Plays a message (TTS), then explicitly ends the call.
+  // Plays a message (TTS), then sends the caller back to the main menu.
   // id_list_message=t-<text> alone leaves Yemot waiting for a next instruction
-  // that never arrives — confirmed (via a working real-world example) that the
-  // fix is chaining &hangup=yes right after the message, exactly like Yemot's
-  // own command-chaining syntax (id_list_message=...&routing_yemot=... etc).
-  // Without this, the call ends in an audible "שגיאה" even though the message
-  // itself was well-formed — this was the actual bug behind the reported error.
-  return `id_list_message=t-${sanitizeForSpeech(text)}&hangup=yes`;
+  // that never arrives, which is what caused the audible "שגיאה" bug — chaining
+  // a second instruction with & (Yemot's command-chaining syntax, confirmed via
+  // a working real-world example) fixes that. go_to_folder=/ sends the caller to
+  // the root of the phone tree (the main menu) instead of just ending the call.
+  return `id_list_message=t-${sanitizeForSpeech(text)}&go_to_folder=/`;
 }
 
 function answerVarName(questionId) {
