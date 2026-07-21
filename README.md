@@ -21,7 +21,25 @@ node app.js
 
 ## מסד נתונים
 
-SQLite, קובץ יחיד: `survey.db` (נוצר אוטומטית בהרצה ראשונה). לגיבוי – פשוט להעתיק את הקובץ.
+**Firebase Firestore** (NoSQL, חינמי לצמיתות - בלי מגבלת 30 יום כמו ב-Postgres החינמי של Render).
+
+### הגדרה
+1. ב-[console.firebase.google.com](https://console.firebase.google.com) → **Add project** → תן שם, אפשר לכבות Google Analytics (לא נחוץ).
+2. בתפריט הצד → **Build** → **Firestore Database** → **Create database** → מצב **Production** → תבחר אזור (למשל `eur3` אם קרוב לישראל).
+3. **Project settings** (⚙️ ליד "Project Overview") → **Service accounts** → **Generate new private key** - מוריד קובץ `.json`.
+4. פתח את הקובץ שהורד בעורך טקסט, העתק את **כל** התוכן שלו (כולל הסוגריים המסולסלים).
+5. ב-Render: השירות `surveys11` → **Environment** → **Add Environment Variable**:
+   - Key: `FIREBASE_SERVICE_ACCOUNT`
+   - Value: מה שהעתקת (כל תוכן ה-JSON, כמות אחת ארוכה)
+6. שמור - Render יעשה Redeploy אוטומטי. אין צורך ליצור טבלאות מראש - Firestore יוצר אוסף (collection) אוטומטית ברגע שנכתב אליו מסמך ראשון.
+
+⚠️ **חשוב:** אל תעלה את קובץ ה-JSON עצמו ל-GitHub בשום שלב - הוא מכיל מפתח סודי עם הרשאה מלאה למסד שלך. הוא צריך להיכנס **רק** דרך Environment Variable ב-Render.
+
+### הרצה מקומית (לבדיקות)
+```bash
+export FIREBASE_SERVICE_ACCOUNT='<תוכן קובץ ה-JSON כמחרוזת אחת>'
+node app.js
+```
 
 ---
 
@@ -107,4 +125,4 @@ GET /display/status
 
 ## פריסה (Hosting)
 
-מומלץ **Railway** או **Render** – יש להם דיסק מתמשך (נדרש עבור קובץ ה-SQLite). **לא מתאים ל-Vercel/Netlify** (אין מערכת קבצים מתמשכת ב-serverless).
+**Render** (Free tier) - מתאים לשכבה החינמית, כי המידע נשמר ב-Firestore (שירות חיצוני של Google, חינמי לצמיתות) ולא בדיסק המקומי של השרת. אין צורך ב-Persistent Disk. **לא מתאים ל-Vercel/Netlify** (עדיין - אלה serverless בלי שרת ארוך-טווח, וה-IVR/Display צריכים שרת שרץ ברציפות).

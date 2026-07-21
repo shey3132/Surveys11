@@ -11,9 +11,9 @@
   "author": "",
   "license": "ISC",
   "dependencies": {
-    "better-sqlite3": "^12.11.1",
     "cors": "^2.8.6",
     "express": "^5.2.1",
+    "firebase-admin": "^14.2.0",
     "multer": "^2.2.0",
     "xlsx": "^0.18.5"
   }

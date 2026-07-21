@@ -1,6 +1,6 @@
 const express = require('express');
-const db = require('../db');
-const { normalizePhone } = require('./admin');
+const { admin, db } = require('../db');
+const { normalizePhone, getQuestionsWithOptions } = require('./admin');
 
 const router = express.Router();
 
@@ -51,7 +51,7 @@ function buildQuestionPrompt(question) {
   return `${question.text} האפשרויות הן ${optionsText}`;
 }
 
-router.all('/survey', (req, res) => {
+router.all('/survey', async (req, res) => {
   // Everything below is wrapped in one try/catch. If ANYTHING throws unexpectedly here
   // (a bad param shape, a DB hiccup, etc.) and we don't catch it, Express falls back to its
   // default error handler — which returns an HTML stack-trace page. Yemot doesn't recognize
@@ -70,31 +70,27 @@ router.all('/survey', (req, res) => {
 
     const phone = normalizePhone(rawPhone);
 
-    const survey = db.prepare("SELECT * FROM surveys WHERE status = 'active' LIMIT 1").get();
-    if (!survey) {
+    const surveySnap = await db.collection('surveys').where('status', '==', 'active').limit(1).get();
+    if (surveySnap.empty) {
       return res.send(buildMessage('אין כרגע סקר פעיל תודה'));
     }
+    const surveyId = surveySnap.docs[0].id;
 
-    const user = db.prepare('SELECT * FROM users WHERE phone = ?').get(phone);
-    if (!user) {
+    const userDoc = await db.collection('users').doc(phone).get();
+    if (!userDoc.exists) {
       return res.send(buildMessage('אינך רשום למענה לסקר זה'));
     }
 
-    const alreadyAnswered = db.prepare(
-      'SELECT 1 FROM responses WHERE survey_id = ? AND user_id = ?'
-    ).get(survey.id, user.id);
-    if (alreadyAnswered) {
+    // Document ID = `${surveyId}_${phone}`, so "has this user already answered this
+    // survey" is a single direct lookup — no query needed, and it doubles as the
+    // exact key we'll atomically create()-guard against below.
+    const responseRef = db.collection('responses').doc(`${surveyId}_${phone}`);
+    const existingResponse = await responseRef.get();
+    if (existingResponse.exists) {
       return res.send(buildMessage('כבר ענית על סקר זה תודה'));
     }
 
-    const questions = db.prepare(
-      'SELECT * FROM questions WHERE survey_id = ? ORDER BY sort_order'
-    ).all(survey.id);
-    for (const q of questions) {
-      q.options = db.prepare(
-        'SELECT id, text, digit FROM options WHERE question_id = ? ORDER BY sort_order'
-      ).all(q.id);
-    }
+    const questions = await getQuestionsWithOptions(surveyId);
 
     // Find the first question that doesn't yet have an answer in the accumulated params.
     const nextQuestion = questions.find(q => {
@@ -119,19 +115,18 @@ router.all('/survey', (req, res) => {
     }
 
     try {
-      const save = db.transaction(() => {
-        const info = db.prepare(
-          'INSERT INTO responses (survey_id, user_id) VALUES (?, ?)'
-        ).run(survey.id, user.id);
-        const responseId = info.lastInsertRowid;
-        const insertAnswer = db.prepare(
-          'INSERT INTO answers (response_id, question_id, option_id) VALUES (?, ?, ?)'
-        );
-        for (const a of answerPairs) insertAnswer.run(responseId, a.questionId, a.optionId);
+      // .create() (as opposed to .set()) fails if the document already exists —
+      // this is what actually guarantees "one submission per user per survey" even
+      // if two requests for the same call race each other, exactly like the SQL
+      // UNIQUE(survey_id, user_id) constraint did in the previous version.
+      await responseRef.create({
+        surveyId,
+        userPhone: phone,
+        submittedAt: admin.firestore.FieldValue.serverTimestamp(),
+        answers: answerPairs
       });
-      save();
     } catch (err) {
-      // UNIQUE(survey_id, user_id) collision = duplicate submission race — treat as already answered.
+      // ALREADY_EXISTS (duplicate submission race) — treat as already answered.
       return res.send(buildMessage('כבר ענית על סקר זה תודה'));
     }
 
