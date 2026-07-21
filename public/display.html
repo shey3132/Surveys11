@@ -1,0 +1,250 @@
+<!DOCTYPE html>
+<html lang="he" dir="rtl">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>תצוגת סקר</title>
+<style>
+  :root{
+    --ink:#f6f4ee;
+    --bg-deep:#0f2419;
+    --line-green:#1f5c3f;
+    --brass:#d9a441;
+    --muted:#9db6a8;
+    --card:#153726;
+  }
+  *{box-sizing:border-box;}
+  html,body{height:100%;}
+  body{
+    margin:0;
+    font-family:'Segoe UI', Tahoma, Arial, sans-serif;
+    background:
+      radial-gradient(ellipse at 50% -10%, #1c4a32 0%, var(--bg-deep) 60%);
+    color:var(--ink);
+    display:flex;
+    flex-direction:column;
+    align-items:center;
+    justify-content:center;
+    min-height:100vh;
+    padding:40px 24px;
+    overflow:hidden;
+  }
+  .stage{
+    width:100%;
+    max-width:980px;
+    text-align:center;
+  }
+  .eyebrow{
+    display:inline-flex;
+    align-items:center;
+    gap:10px;
+    color:var(--brass);
+    font-size:15px;
+    letter-spacing:2px;
+    text-transform:uppercase;
+    margin-bottom:20px;
+    opacity:0.85;
+  }
+  .eyebrow .pulse{
+    width:9px;height:9px;border-radius:50%;
+    background:#5ad18f;
+    box-shadow:0 0 0 0 rgba(90,209,143,0.6);
+    animation:pulse 1.8s infinite;
+  }
+  @keyframes pulse{
+    0%{box-shadow:0 0 0 0 rgba(90,209,143,0.55);}
+    70%{box-shadow:0 0 0 14px rgba(90,209,143,0);}
+    100%{box-shadow:0 0 0 0 rgba(90,209,143,0);}
+  }
+  h1.question{
+    font-size:clamp(28px, 4.4vw, 52px);
+    font-weight:700;
+    line-height:1.25;
+    margin:0 0 44px;
+    text-wrap:balance;
+  }
+  .options{
+    display:grid;
+    gap:14px;
+    max-width:760px;
+    margin:0 auto 44px;
+    text-align:right;
+  }
+  .option{
+    display:flex;
+    align-items:center;
+    gap:16px;
+    background:var(--card);
+    border:1px solid rgba(255,255,255,0.08);
+    border-radius:12px;
+    padding:16px 22px;
+    font-size:clamp(16px, 2vw, 22px);
+  }
+  .option .digit{
+    flex-shrink:0;
+    width:42px;height:42px;
+    border-radius:50%;
+    background:var(--brass);
+    color:#1c1b1f;
+    font-weight:800;
+    font-size:19px;
+    display:flex;align-items:center;justify-content:center;
+    font-family:'Courier New', monospace;
+  }
+  .counter{
+    display:inline-flex;
+    align-items:baseline;
+    gap:10px;
+    background:rgba(255,255,255,0.06);
+    padding:14px 32px;
+    border-radius:40px;
+    border:1px solid rgba(255,255,255,0.1);
+  }
+  .counter .num{
+    font-size:44px;
+    font-weight:800;
+    color:var(--brass);
+    font-variant-numeric:tabular-nums;
+    transition:transform .15s;
+  }
+  .counter .num.bump{transform:scale(1.15);}
+  .counter .lbl{font-size:15px; color:var(--muted);}
+
+  /* idle */
+  .idle-icon{font-size:60px; opacity:0.5; margin-bottom:18px;}
+  .idle-text{font-size:22px; color:var(--muted);}
+
+  /* results */
+  .results-title{
+    font-size:clamp(24px, 3.6vw, 40px);
+    font-weight:700;
+    margin-bottom:8px;
+  }
+  .results-sub{color:var(--muted); font-size:16px; margin-bottom:36px;}
+  .result-block{
+    max-width:760px;
+    margin:0 auto 34px;
+    text-align:right;
+  }
+  .result-block h3{font-size:19px; margin:0 0 14px; font-weight:600;}
+  .rbar-row{
+    display:flex; align-items:center; gap:14px;
+    margin-bottom:12px;
+    font-size:15px;
+  }
+  .rbar-label{width:200px; flex-shrink:0; text-align:right;}
+  .rbar-track{
+    flex:1; height:22px; background:rgba(255,255,255,0.08);
+    border-radius:20px; overflow:hidden;
+  }
+  .rbar-fill{
+    height:100%;
+    background:linear-gradient(90deg, var(--line-green), var(--brass));
+    border-radius:20px;
+    transition:width .6s ease;
+  }
+  .rbar-pct{width:70px; flex-shrink:0; text-align:left; color:var(--brass); font-weight:700;}
+
+  .fade-in{animation:fadeIn .4s ease;}
+  @keyframes fadeIn{from{opacity:0; transform:translateY(6px);} to{opacity:1; transform:translateY(0);}}
+</style>
+</head>
+<body>
+
+<div class="stage" id="stage">
+  <div class="idle-icon">☎</div>
+  <div class="idle-text">ממתין לסקר...</div>
+</div>
+
+<script>
+const API = '';
+const stage = document.getElementById('stage');
+let lastCount = null;
+let lastStatus = null;
+
+async function poll(){
+  try{
+    const res = await fetch(API + '/display/status');
+    const data = await res.json();
+    render(data);
+  }catch(err){ /* keep last rendered state on transient network errors */ }
+}
+
+function render(data){
+  if (data.status === 'idle'){
+    if (lastStatus !== 'idle'){
+      stage.innerHTML = `<div class="idle-icon">☎</div><div class="idle-text">ממתין לסקר...</div>`;
+    }
+    lastStatus = 'idle';
+    lastCount = null;
+    return;
+  }
+
+  if (data.status === 'active'){
+    const bump = lastCount !== null && data.response_count !== lastCount;
+    const optionsHtml = (data.options || []).map(o => `
+      <div class="option">
+        <span class="digit">${o.digit}</span>
+        <span>${escapeHtml(o.text)}</span>
+      </div>
+    `).join('');
+
+    stage.innerHTML = `
+      <div class="eyebrow"><span class="pulse"></span> סקר פעיל — ${escapeHtml(data.survey_title || '')}</div>
+      <h1 class="question fade-in">${escapeHtml(data.question || '')}</h1>
+      <div class="options">${optionsHtml}</div>
+      <div class="counter">
+        <span class="num ${bump ? 'bump' : ''}" id="countNum">${data.response_count}</span>
+        <span class="lbl">משיבים עד כה</span>
+      </div>
+    `;
+    if (bump){
+      setTimeout(() => {
+        const el = document.getElementById('countNum');
+        if (el) el.classList.remove('bump');
+      }, 200);
+    }
+    lastCount = data.response_count;
+    lastStatus = 'active';
+    return;
+  }
+
+  if (data.status === 'closed'){
+    if (lastStatus !== 'closed'){
+      const blocks = (data.results || []).map(q => `
+        <div class="result-block">
+          <h3>${escapeHtml(q.question)}</h3>
+          ${q.options.map(o => `
+            <div class="rbar-row">
+              <div class="rbar-label">${escapeHtml(o.text)}</div>
+              <div class="rbar-track"><div class="rbar-fill" style="width:${o.percent}%"></div></div>
+              <div class="rbar-pct">${o.percent}%</div>
+            </div>
+          `).join('')}
+        </div>
+      `).join('');
+
+      stage.innerHTML = `
+        <div class="eyebrow"><span style="width:9px;height:9px;border-radius:50%;background:var(--brass);display:inline-block;"></span> הסקר הסתיים</div>
+        <div class="results-title fade-in">${escapeHtml(data.survey_title || '')}</div>
+        <div class="results-sub">תוצאות סופיות</div>
+        ${blocks}
+      `;
+    }
+    lastStatus = 'closed';
+    return;
+  }
+}
+
+function escapeHtml(str){
+  const d = document.createElement('div');
+  d.textContent = str;
+  return d.innerHTML;
+}
+
+poll();
+setInterval(poll, 2000);
+</script>
+
+</body>
+</html>

@@ -1,4 +1,5 @@
 const express = require('express');
+const path = require('path');
 const cors = require('cors');
 
 const { router: adminRouter } = require('./routes/admin');
@@ -10,6 +11,9 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 app.use(express.urlencoded({ extended: true })); // Yemot can POST as form-encoded
+
+// Static pages: admin dashboard + live display screen
+app.use(express.static(path.join(__dirname, 'public')));
 
 app.use('/admin', adminRouter);
 app.use('/ivr', ivrRouter);
