@@ -30,10 +30,14 @@ function buildReadCommand(text, varName) {
 }
 
 function buildMessage(text) {
-  // Plays a message (TTS) with no further input expected, then ends the call.
-  // Confirmed against Yemot's own API docs — id_list_message=t-<text> is a valid,
-  // documented "speak and finish" command.
-  return `id_list_message=t-${sanitizeForSpeech(text)}`;
+  // Plays a message (TTS), then explicitly ends the call.
+  // id_list_message=t-<text> alone leaves Yemot waiting for a next instruction
+  // that never arrives — confirmed (via a working real-world example) that the
+  // fix is chaining &hangup=yes right after the message, exactly like Yemot's
+  // own command-chaining syntax (id_list_message=...&routing_yemot=... etc).
+  // Without this, the call ends in an audible "שגיאה" even though the message
+  // itself was well-formed — this was the actual bug behind the reported error.
+  return `id_list_message=t-${sanitizeForSpeech(text)}&hangup=yes`;
 }
 
 function answerVarName(questionId) {
