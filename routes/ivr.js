@@ -23,7 +23,10 @@ function sanitizeForSpeech(text) {
 function buildReadCommand(text, varName) {
   const safeText = sanitizeForSpeech(text);
   // read=t-<text>=<var>,yes,<max>,<min>,<timeout>,Number,<readback>,<confirm>
-  return `read=t-${safeText}=${varName},yes,1,1,7,Number,yes,no`;
+  // confirm=yes: after the caller presses a digit, Yemot automatically asks
+  // "לאישור הקישו 1, לשינוי הקישו 2" before moving on — built-in confirmation,
+  // no extra code needed on our side.
+  return `read=t-${safeText}=${varName},yes,1,1,7,Number,yes,yes`;
 }
 
 function buildMessage(text) {
@@ -35,6 +38,17 @@ function buildMessage(text) {
 
 function answerVarName(questionId) {
   return `ans_${questionId}`;
+}
+
+// Builds a clear, first-time-caller-friendly prompt for a question:
+// states the question, then reads each option as "לבחירת X הקישו Y" —
+// easier to follow on a phone than "הקישו Y לבחירה ב X", especially for
+// someone who's never used this system before.
+function buildQuestionPrompt(question) {
+  const optionsText = question.options
+    .map(o => `לבחירת ${o.text} הקישו ${o.digit}`)
+    .join(' ');
+  return `${question.text} האפשרויות הן ${optionsText}`;
 }
 
 router.all('/survey', (req, res) => {
@@ -89,11 +103,7 @@ router.all('/survey', (req, res) => {
     });
 
     if (nextQuestion) {
-      const optionsText = nextQuestion.options
-        .map(o => `הקישו ${o.digit} לבחירה ב ${o.text}`)
-        .join(' ');
-      const promptText = `${nextQuestion.text} ${optionsText}`;
-      return res.send(buildReadCommand(promptText, answerVarName(nextQuestion.id)));
+      return res.send(buildReadCommand(buildQuestionPrompt(nextQuestion), answerVarName(nextQuestion.id)));
     }
 
     // All questions answered -> validate digits, save, and finish.
@@ -103,8 +113,7 @@ router.all('/survey', (req, res) => {
       const option = q.options.find(o => o.digit === digit);
       if (!option) {
         // Invalid/garbled input somewhere — safest is to ask the question again.
-        const optionsText = q.options.map(o => `הקישו ${o.digit} לבחירה ב ${o.text}`).join(' ');
-        return res.send(buildReadCommand(`${q.text} ${optionsText}`, answerVarName(q.id)));
+        return res.send(buildReadCommand(buildQuestionPrompt(q), answerVarName(q.id)));
       }
       answerPairs.push({ questionId: q.id, optionId: option.id });
     }
@@ -126,7 +135,7 @@ router.all('/survey', (req, res) => {
       return res.send(buildMessage('כבר ענית על סקר זה תודה'));
     }
 
-    return res.send(buildMessage('תודה על מענה לסקר'));
+    return res.send(buildMessage('תודה תשובתך נקלטה ונשמרה במערכת בהצלחה'));
   } catch (err) {
     console.error('IVR /survey unexpected error:', err);
     return res.send(buildMessage('אירעה שגיאה טכנית נסו שוב מאוחר יותר'));
