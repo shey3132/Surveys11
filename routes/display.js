@@ -32,6 +32,21 @@ router.get('/status', async (req, res) => {
     }
   }
 
+  // If the admin hit "נקה מסך" after this survey closed, show idle instead of
+  // its results — but a survey closed *after* that clear still shows normally,
+  // so this never masks a genuinely new result.
+  if (survey && survey.status === 'closed') {
+    const metaDoc = await db.collection('meta').doc('display').get();
+    if (metaDoc.exists) {
+      const clearedAt = metaDoc.data().clearedAt;
+      const clearedMs = clearedAt && clearedAt.toMillis ? clearedAt.toMillis() : 0;
+      const closedMs = survey.closedAt && survey.closedAt.toMillis ? survey.closedAt.toMillis() : 0;
+      if (clearedMs >= closedMs) {
+        survey = null;
+      }
+    }
+  }
+
   if (!survey) {
     return res.json({ status: 'idle' });
   }

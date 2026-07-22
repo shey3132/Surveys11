@@ -261,6 +261,22 @@ router.post('/surveys/:id/close', async (req, res) => {
   res.json(await getFullSurvey(req.params.id));
 });
 
+// ---------- DISPLAY SCREEN ----------
+
+// POST /admin/display/clear
+// The display screen shows the most recently closed survey's results by default,
+// indefinitely, until a new survey is activated. This lets an admin manually send
+// it back to the idle "waiting" screen without needing to touch survey state.
+// Implemented as a timestamp rather than a delete: display.js only shows a closed
+// survey's results if that survey closed *after* the last clear — so results from
+// a survey closed later (even accidentally, e.g. re-closing) still surface normally.
+router.post('/display/clear', async (req, res) => {
+  await db.collection('meta').doc('display').set({
+    clearedAt: FieldValue.serverTimestamp()
+  });
+  res.json({ ok: true });
+});
+
 // GET /admin/surveys/:id/results  - counts/percentages only
 router.get('/surveys/:id/results', async (req, res) => {
   const surveyDoc = await db.collection('surveys').doc(req.params.id).get();

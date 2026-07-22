@@ -251,6 +251,14 @@
     </table>
   </section>
 
+  <!-- 4. Display screen control -->
+  <section class="card">
+    <h2><span class="num">4</span> מסך תצוגה</h2>
+    <p class="hint">אחרי שסוגרים סקר, מסך התצוגה הגדול ממשיך להראות את התוצאות שלו לצמיתות, גם בעוד שעות. הכפתור הזה מחזיר אותו למצג "ממתין" באופן ידני, בלי לגעת בסקרים עצמם.</p>
+    <button class="btn-ghost" id="clearDisplayBtn" type="button">🧹 נקה מסך תצוגה</button>
+    <div id="clearDisplayMsg" class="msg"></div>
+  </section>
+
 </main>
 
 <script>
@@ -491,6 +499,18 @@ function escapeHtml(str){
   d.textContent = str;
   return d.innerHTML;
 }
+
+// ---------- Display screen control ----------
+document.getElementById('clearDisplayBtn').addEventListener('click', async () => {
+  const msgEl = document.getElementById('clearDisplayMsg');
+  try{
+    const res = await fetch(API + '/admin/display/clear', { method: 'POST' });
+    if (!res.ok) throw new Error('שגיאה');
+    showMsg(msgEl, 'מסך התצוגה אופס - יחזור למצג "ממתין" בתוך כמה שניות', true);
+  }catch(err){
+    showMsg(msgEl, 'שגיאה באיפוס המסך: ' + err.message, false);
+  }
+});
 
 loadSurveys();
 loadUserCount();
