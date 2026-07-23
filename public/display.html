@@ -73,6 +73,8 @@
     width:100%; max-width:min(94vw, 1700px);
     padding:40px 32px;
     text-align:center;
+    transform-origin:center center;
+    transition:transform .25s ease;
   }
 
   /* ---- idle ---- */
@@ -292,6 +294,7 @@ function render(data){
           <div class="idle-text">ממתינים לסקר הבא…</div>
         </div>
       `;
+      fitStage();
     }
     lastStatus = 'idle'; lastCount = null;
     return;
@@ -317,6 +320,7 @@ function render(data){
         </div>
       </div>
     `;
+    fitStage();
     if (bump){
       const box = document.getElementById('counterBox');
       burstConfetti(box);
@@ -358,10 +362,31 @@ function render(data){
         <div class="results-sub">${escapeHtml(data.survey_title || '')}</div>
         ${blocks}
       `;
+      fitStage();
     }
     lastStatus = 'closed';
     return;
   }
+}
+
+// If the rendered content is taller than the screen, shrink the whole stage
+// (uniformly, via CSS transform) until it fits — this is what keeps the
+// respondent counter (or anything else) from being pushed off-screen when a
+// survey has more questions/options than usual. No scrolling is possible on
+// an unattended big-screen display, so everything must always fit as-is.
+function fitStage(){
+  requestAnimationFrame(() => {
+    stage.style.transform = 'scale(1)';
+    // Read natural size on the next frame, after the reset above has applied.
+    requestAnimationFrame(() => {
+      const available = window.innerHeight * 0.94;
+      const needed = stage.scrollHeight;
+      if (needed > available){
+        const scale = Math.max(0.45, available / needed);
+        stage.style.transform = `scale(${scale})`;
+      }
+    });
+  });
 }
 
 function escapeHtml(str){
@@ -369,6 +394,8 @@ function escapeHtml(str){
   d.textContent = str;
   return d.innerHTML;
 }
+
+window.addEventListener('resize', fitStage);
 
 poll();
 setInterval(poll, 2000);
