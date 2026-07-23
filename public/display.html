@@ -217,12 +217,24 @@
     gap:24px;
   }
   .result-card{
+    position:relative;
+    overflow:hidden;
     background:var(--card);
     border:1px solid var(--card-line);
     border-radius:26px;
     padding:clamp(24px,3vw,44px) clamp(18px,2.4vw,28px);
     backdrop-filter:blur(6px);
     transition:transform .3s, box-shadow .3s;
+  }
+  .result-card > *{ position:relative; z-index:1; }
+  .card-fill{
+    position:absolute; left:0; right:0; bottom:0; z-index:0;
+    height:0%;
+    background:linear-gradient(180deg, rgba(255,61,129,0.4), rgba(0,229,199,0.22));
+    transition:height 1.5s cubic-bezier(.16,.85,.2,1);
+  }
+  .result-card.leader .card-fill{
+    background:linear-gradient(180deg, rgba(255,201,60,0.5), rgba(255,201,60,0.16));
   }
   .result-card.leader{
     border-color:var(--gold);
@@ -392,11 +404,12 @@ function render(data){
               ${q.options.map(o => {
                 const isLeader = maxCount > 0 && o.count === maxCount;
                 return `
-                  <div class="result-card ${isLeader ? 'leader' : ''}">
+                  <div class="result-card ${isLeader ? 'leader' : ''}" data-percent="${o.percent}" data-count="${o.count}">
+                    <div class="card-fill"></div>
                     ${isLeader ? '<div class="card-crown">👑</div>' : ''}
                     <div class="card-name">${escapeHtml(o.text)}</div>
-                    <div class="card-percent">${o.percent}%</div>
-                    <div class="card-count">${o.count} קולות</div>
+                    <div class="card-percent"><span class="card-percent-num">0</span>%</div>
+                    <div class="card-count"><span class="card-count-num">0</span> קולות</div>
                   </div>
                 `;
               }).join('')}
@@ -413,10 +426,43 @@ function render(data){
         ${blocks}
       `;
       fitStage();
+      animateResultCards();
     }
     lastStatus = 'closed';
     return;
   }
+}
+
+// Reveals results with a "filling up" effect instead of snapping straight to the
+// final numbers: each card's liquid-style fill rises from empty to its real
+// percentage while the percent/count numbers count up in sync, staggered
+// slightly card-by-card for a cascading, suspenseful reveal.
+function animateResultCards(){
+  const cards = stage.querySelectorAll('.result-card');
+  cards.forEach((card, i) => {
+    const targetPercent = parseFloat(card.dataset.percent) || 0;
+    const targetCount = parseInt(card.dataset.count, 10) || 0;
+    const fill = card.querySelector('.card-fill');
+    const percentEl = card.querySelector('.card-percent-num');
+    const countEl = card.querySelector('.card-count-num');
+    const delay = i * 180;
+
+    setTimeout(() => {
+      requestAnimationFrame(() => {
+        if (fill) fill.style.height = targetPercent + '%';
+      });
+      const duration = 1400;
+      const start = performance.now();
+      function tick(now){
+        const t = Math.min(1, (now - start) / duration);
+        const eased = 1 - Math.pow(1 - t, 3); // ease-out — fast start, gentle settle
+        if (percentEl) percentEl.textContent = Math.round(targetPercent * eased);
+        if (countEl) countEl.textContent = Math.round(targetCount * eased);
+        if (t < 1) requestAnimationFrame(tick);
+      }
+      requestAnimationFrame(tick);
+    }, delay);
+  });
 }
 
 // If the rendered content is taller than the screen, shrink the whole stage
