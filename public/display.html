@@ -224,14 +224,14 @@
     border-radius:26px;
     padding:clamp(24px,3vw,44px) clamp(18px,2.4vw,28px);
     backdrop-filter:blur(6px);
-    transition:transform .3s, box-shadow .3s;
+    transition:transform .4s ease, box-shadow .4s ease, border-color .4s ease, background .4s ease;
   }
   .result-card > *{ position:relative; z-index:1; }
   .card-fill{
     position:absolute; left:0; right:0; bottom:0; z-index:0;
     height:0%;
     background:linear-gradient(180deg, rgba(255,61,129,0.4), rgba(0,229,199,0.22));
-    transition:height 1.5s cubic-bezier(.16,.85,.2,1);
+    transition:height 1.5s cubic-bezier(.16,.85,.2,1), background .4s ease;
   }
   .result-card.leader .card-fill{
     background:linear-gradient(180deg, rgba(255,201,60,0.5), rgba(255,201,60,0.16));
@@ -246,6 +246,12 @@
     font-size:clamp(30px,3.4vw,44px);
     margin-bottom:6px;
     filter:drop-shadow(0 0 18px rgba(255,201,60,0.6));
+    animation:crownPop .55s cubic-bezier(.34,1.56,.64,1);
+  }
+  @keyframes crownPop{
+    0%{ transform:scale(0) rotate(-20deg); opacity:0; }
+    65%{ transform:scale(1.25) rotate(10deg); opacity:1; }
+    100%{ transform:scale(1) rotate(0deg); opacity:1; }
   }
   .card-name{
     font-size:clamp(19px,2vw,27px);
@@ -396,23 +402,18 @@ function render(data){
   if (data.status === 'closed'){
     if (lastStatus !== 'closed'){
       const blocks = (data.results || []).map(q => {
-        const maxCount = Math.max(0, ...q.options.map(o => o.count));
         return `
           <div class="result-block">
             <h3>${escapeHtml(q.question)}</h3>
             <div class="result-cards">
-              ${q.options.map(o => {
-                const isLeader = maxCount > 0 && o.count === maxCount;
-                return `
-                  <div class="result-card ${isLeader ? 'leader' : ''}" data-percent="${o.percent}" data-count="${o.count}">
-                    <div class="card-fill"></div>
-                    ${isLeader ? '<div class="card-crown">👑</div>' : ''}
-                    <div class="card-name">${escapeHtml(o.text)}</div>
-                    <div class="card-percent"><span class="card-percent-num">0</span>%</div>
-                    <div class="card-count"><span class="card-count-num">0</span> קולות</div>
-                  </div>
-                `;
-              }).join('')}
+              ${q.options.map(o => `
+                <div class="result-card" data-percent="${o.percent}" data-count="${o.count}">
+                  <div class="card-fill"></div>
+                  <div class="card-name">${escapeHtml(o.text)}</div>
+                  <div class="card-percent"><span class="card-percent-num">0</span>%</div>
+                  <div class="card-count"><span class="card-count-num">0</span> קולות</div>
+                </div>
+              `).join('')}
             </div>
           </div>
         `;
@@ -436,32 +437,62 @@ function render(data){
 // Reveals results with a "filling up" effect instead of snapping straight to the
 // final numbers: each card's liquid-style fill rises from empty to its real
 // percentage while the percent/count numbers count up in sync, staggered
-// slightly card-by-card for a cascading, suspenseful reveal.
+// slightly card-by-card for a cascading, suspenseful reveal. The winner isn't
+// shown up front (no gold styling, no crown, no rank-sorted position) — it's
+// only "crowned" once every card in its block has finished counting, so
+// there's still real suspense in watching it play out.
 function animateResultCards(){
-  const cards = stage.querySelectorAll('.result-card');
-  cards.forEach((card, i) => {
-    const targetPercent = parseFloat(card.dataset.percent) || 0;
-    const targetCount = parseInt(card.dataset.count, 10) || 0;
-    const fill = card.querySelector('.card-fill');
-    const percentEl = card.querySelector('.card-percent-num');
-    const countEl = card.querySelector('.card-count-num');
-    const delay = i * 180;
+  stage.querySelectorAll('.result-block').forEach(block => {
+    const cards = Array.from(block.querySelectorAll('.result-card'));
+    let remaining = cards.length;
+    let leaderCard = null;
+    let leaderPercent = -1;
 
-    setTimeout(() => {
-      requestAnimationFrame(() => {
-        if (fill) fill.style.height = targetPercent + '%';
-      });
-      const duration = 1400;
-      const start = performance.now();
-      function tick(now){
-        const t = Math.min(1, (now - start) / duration);
-        const eased = 1 - Math.pow(1 - t, 3); // ease-out — fast start, gentle settle
-        if (percentEl) percentEl.textContent = Math.round(targetPercent * eased);
-        if (countEl) countEl.textContent = Math.round(targetCount * eased);
-        if (t < 1) requestAnimationFrame(tick);
+    cards.forEach((card, i) => {
+      const targetPercent = parseFloat(card.dataset.percent) || 0;
+      const targetCount = parseInt(card.dataset.count, 10) || 0;
+      if (targetPercent > leaderPercent) {
+        leaderPercent = targetPercent;
+        leaderCard = card;
       }
-      requestAnimationFrame(tick);
-    }, delay);
+      const fill = card.querySelector('.card-fill');
+      const percentEl = card.querySelector('.card-percent-num');
+      const countEl = card.querySelector('.card-count-num');
+      const delay = i * 180;
+
+      setTimeout(() => {
+        requestAnimationFrame(() => {
+          if (fill) fill.style.height = targetPercent + '%';
+        });
+        const duration = 1400;
+        const start = performance.now();
+        function tick(now){
+          const t = Math.min(1, (now - start) / duration);
+          const eased = 1 - Math.pow(1 - t, 3); // ease-out — fast start, gentle settle
+          if (percentEl) percentEl.textContent = Math.round(targetPercent * eased);
+          if (countEl) countEl.textContent = Math.round(targetCount * eased);
+          if (t < 1){
+            requestAnimationFrame(tick);
+          } else {
+            remaining -= 1;
+            if (remaining === 0) revealLeader();
+          }
+        }
+        requestAnimationFrame(tick);
+      }, delay);
+    });
+
+    function revealLeader(){
+      if (!leaderCard || leaderPercent <= 0) return;
+      setTimeout(() => {
+        leaderCard.classList.add('leader');
+        const crown = document.createElement('div');
+        crown.className = 'card-crown';
+        crown.textContent = '👑';
+        const fillEl = leaderCard.querySelector('.card-fill');
+        fillEl.insertAdjacentElement('afterend', crown);
+      }, 350);
+    }
   });
 }
 

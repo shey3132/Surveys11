@@ -74,11 +74,10 @@ router.get('/status', async (req, res) => {
   // closed
   const results = await buildResults(survey.id);
   const surveyType = survey.type === 'contest' ? 'contest' : 'regular';
-  if (surveyType === 'contest') {
-    // Sort options within each question by vote count so the final reveal reads
-    // as a ranked leaderboard, winner first.
-    results.forEach(q => q.options.sort((a, b) => b.count - a.count));
-  }
+  // Deliberately NOT sorted by vote count: card position is fixed at entry order
+  // for both survey types, so the winner isn't given away by where their card
+  // sits before the reveal animation even starts. The frontend crowns the
+  // actual leader dynamically, only after every card finishes counting up.
 
   return res.json({
     status: 'closed',
