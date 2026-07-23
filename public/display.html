@@ -210,6 +210,53 @@
   .rbar-fill.leader{ background:linear-gradient(90deg, var(--gold), #fff3cf); box-shadow:0 0 22px rgba(255,201,60,0.6); }
   .rbar-pct{ width:90px; flex-shrink:0; text-align:left; font-weight:800; font-size:clamp(18px,1.8vw,26px); color:var(--gold); }
 
+  /* result cards — one per option/contestant, percentage front and center */
+  .result-cards{
+    display:grid;
+    grid-template-columns:repeat(auto-fit, minmax(220px, 1fr));
+    gap:24px;
+  }
+  .result-card{
+    background:var(--card);
+    border:1px solid var(--card-line);
+    border-radius:26px;
+    padding:clamp(24px,3vw,44px) clamp(18px,2.4vw,28px);
+    backdrop-filter:blur(6px);
+    transition:transform .3s, box-shadow .3s;
+  }
+  .result-card.leader{
+    border-color:var(--gold);
+    background:linear-gradient(160deg, rgba(255,201,60,0.16), var(--card));
+    box-shadow:0 0 46px rgba(255,201,60,0.35);
+    transform:scale(1.06);
+  }
+  .card-crown{
+    font-size:clamp(30px,3.4vw,44px);
+    margin-bottom:6px;
+    filter:drop-shadow(0 0 18px rgba(255,201,60,0.6));
+  }
+  .card-name{
+    font-size:clamp(19px,2vw,27px);
+    font-weight:700;
+    margin-bottom:16px;
+  }
+  .card-percent{
+    font-size:clamp(46px,6.4vw,88px);
+    font-weight:900;
+    line-height:1;
+    margin-bottom:10px;
+    background:linear-gradient(135deg, var(--pink), var(--cyan));
+    -webkit-background-clip:text; background-clip:text; color:transparent;
+  }
+  .result-card.leader .card-percent{
+    background:linear-gradient(135deg, var(--gold), #fff3cf);
+    -webkit-background-clip:text; background-clip:text;
+  }
+  .card-count{
+    color:var(--muted);
+    font-size:clamp(14px,1.3vw,19px);
+  }
+
   .fade-in{ animation:fadeIn .5s ease; }
   @keyframes fadeIn{ from{opacity:0; transform:translateY(10px);} to{opacity:1; transform:translateY(0);} }
 </style>
@@ -310,7 +357,7 @@ function render(data){
     `).join('');
 
     stage.innerHTML = `
-      <div class="eyebrow fade-in"><span class="live-dot"></span> משדרים חי · ${escapeHtml(data.survey_title || '')}</div>
+      <div class="eyebrow fade-in"><span class="live-dot"></span> הצבעה פעילה · ${escapeHtml(data.survey_title || '')}</div>
       <h1 class="question fade-in">${escapeHtml(data.question || '')}</h1>
       <div class="options">${optionsHtml}</div>
       <div class="counter-wrap">
@@ -341,16 +388,19 @@ function render(data){
         return `
           <div class="result-block">
             <h3>${escapeHtml(q.question)}</h3>
-            ${q.options.map(o => {
-              const isLeader = maxCount > 0 && o.count === maxCount;
-              return `
-                <div class="rbar-row">
-                  <div class="rbar-label">${isLeader ? '👑 ' : ''}${escapeHtml(o.text)}</div>
-                  <div class="rbar-track"><div class="rbar-fill ${isLeader ? 'leader' : ''}" style="width:${o.percent}%"></div></div>
-                  <div class="rbar-pct">${o.percent}%</div>
-                </div>
-              `;
-            }).join('')}
+            <div class="result-cards">
+              ${q.options.map(o => {
+                const isLeader = maxCount > 0 && o.count === maxCount;
+                return `
+                  <div class="result-card ${isLeader ? 'leader' : ''}">
+                    ${isLeader ? '<div class="card-crown">👑</div>' : ''}
+                    <div class="card-name">${escapeHtml(o.text)}</div>
+                    <div class="card-percent">${o.percent}%</div>
+                    <div class="card-count">${o.count} קולות</div>
+                  </div>
+                `;
+              }).join('')}
+            </div>
           </div>
         `;
       }).join('');
