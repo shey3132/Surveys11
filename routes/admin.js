@@ -17,6 +17,33 @@ function tsToIso(ts) {
   return ts && typeof ts.toDate === 'function' ? ts.toDate().toISOString() : null;
 }
 
+// ---------- Active survey cache ----------
+// A survey's questions/options never change once it's active (editing is only
+// allowed in 'draft'), so re-fetching them from Firestore on every single IVR
+// call is pure waste — this is the single biggest cost on the hot call path,
+// and the free Render instance has very little CPU to spend re-doing it.
+// Cached in memory, invalidated only when a survey is activated or closed
+// (the only two actions that can change "what the active survey is").
+let activeSurveyCache = null; // { id, type, questions } | null
+
+function invalidateActiveSurveyCache() {
+  activeSurveyCache = null;
+}
+
+async function getActiveSurveyCached() {
+  if (activeSurveyCache) return activeSurveyCache;
+  const snap = await db.collection('surveys').where('status', '==', 'active').limit(1).get();
+  if (snap.empty) return null;
+  const doc = snap.docs[0];
+  const questions = await getQuestionsWithOptions(doc.id);
+  activeSurveyCache = {
+    id: doc.id,
+    type: doc.data().type === 'contest' ? 'contest' : 'regular',
+    questions
+  };
+  return activeSurveyCache;
+}
+
 // Deletes every document in a top-level collection (no subcollections),
 // in batches of 500 (Firestore's per-batch write limit).
 async function deleteAllDocs(collectionRef) {
@@ -105,16 +132,15 @@ async function getQuestionsWithOptions(surveyId) {
   const qSnap = await db.collection('surveys').doc(surveyId).collection('questions')
     .orderBy('sortOrder').get();
 
-  const questions = [];
-  for (const qDoc of qSnap.docs) {
+  const questions = await Promise.all(qSnap.docs.map(async qDoc => {
     const qData = qDoc.data();
     const oSnap = await qDoc.ref.collection('options').orderBy('sortOrder').get();
     const options = oSnap.docs.map(oDoc => {
       const oData = oDoc.data();
       return { id: oDoc.id, text: oData.text, digit: oData.digit };
     });
-    questions.push({ id: qDoc.id, survey_id: surveyId, text: qData.text, sort_order: qData.sortOrder, options });
-  }
+    return { id: qDoc.id, survey_id: surveyId, text: qData.text, sort_order: qData.sortOrder, options };
+  }));
   return questions;
 }
 
@@ -133,9 +159,12 @@ async function writeQuestions(surveyId, questions) {
   await batch.commit();
 }
 
-// POST /admin/surveys  { title, description, questions: [{ text, options: [text, text, ...] }] }
+// POST /admin/surveys  { title, description, type, questions: [{ text, options: [text, text, ...] }] }
+// type: 'regular' (default, opinion/satisfaction poll — results hidden until closed) or
+//       'contest' (winner vote — live leaderboard shown while the survey is still active)
 router.post('/surveys', async (req, res) => {
   const { title, description, questions } = req.body;
+  const type = req.body.type === 'contest' ? 'contest' : 'regular';
   if (!title || !Array.isArray(questions) || questions.length === 0) {
     return res.status(400).json({ error: 'נדרש title ולפחות שאלה אחת (questions)' });
   }
@@ -155,6 +184,7 @@ router.post('/surveys', async (req, res) => {
     await surveyRef.set({
       title,
       description: description || null,
+      type,
       status: 'draft',
       createdAt: FieldValue.serverTimestamp(),
       activatedAt: null,
@@ -179,6 +209,7 @@ router.put('/surveys/:id', async (req, res) => {
   }
 
   const { title, description, questions } = req.body;
+  const type = req.body.type === 'contest' ? 'contest' : 'regular';
   if (!title || !Array.isArray(questions) || questions.length === 0) {
     return res.status(400).json({ error: 'נדרש title ולפחות שאלה אחת (questions)' });
   }
@@ -189,7 +220,7 @@ router.put('/surveys/:id', async (req, res) => {
   }
 
   try {
-    await surveyRef.update({ title, description: description || null });
+    await surveyRef.update({ title, description: description || null, type });
     // Simplest correct approach: wipe and recreate questions/options for this survey.
     await db.recursiveDelete(surveyRef.collection('questions'));
     await writeQuestions(req.params.id, questions);
@@ -208,6 +239,7 @@ router.get('/surveys', async (req, res) => {
       id: d.id,
       title: data.title,
       description: data.description,
+      type: data.type || 'regular',
       status: data.status,
       created_at: tsToIso(data.createdAt),
       activated_at: tsToIso(data.activatedAt),
@@ -243,6 +275,7 @@ router.post('/surveys/:id/activate', async (req, res) => {
     });
     batch.update(surveyRef, { status: 'active', activatedAt: FieldValue.serverTimestamp() });
     await batch.commit();
+    invalidateActiveSurveyCache();
   } catch (err) {
     return res.status(500).json({ error: 'שגיאה בהפעלת הסקר', details: err.message });
   }
@@ -257,6 +290,7 @@ router.post('/surveys/:id/close', async (req, res) => {
   if (!surveyDoc.exists) return res.status(404).json({ error: 'סקר לא נמצא' });
 
   await surveyRef.update({ status: 'closed', closedAt: FieldValue.serverTimestamp() });
+  invalidateActiveSurveyCache();
 
   res.json(await getFullSurvey(req.params.id));
 });
@@ -302,6 +336,7 @@ async function getFullSurvey(surveyId) {
     id: surveyId,
     title: data.title,
     description: data.description,
+    type: data.type || 'regular',
     status: data.status,
     created_at: tsToIso(data.createdAt),
     activated_at: tsToIso(data.activatedAt),
@@ -311,12 +346,13 @@ async function getFullSurvey(surveyId) {
 }
 
 async function buildResults(surveyId) {
-  const questions = await getQuestionsWithOptions(surveyId);
-
   // Small-scale app (single active survey, modest response counts) — reading every
   // response doc for this survey and tallying in memory is simpler and safer than
   // maintaining running counters, and avoids any Firestore composite-index concerns.
-  const responsesSnap = await db.collection('responses').where('surveyId', '==', surveyId).get();
+  const [questions, responsesSnap] = await Promise.all([
+    getQuestionsWithOptions(surveyId),
+    db.collection('responses').where('surveyId', '==', surveyId).get()
+  ]);
   const totalResponses = responsesSnap.size;
 
   const countByOption = {};
@@ -337,4 +373,4 @@ async function buildResults(surveyId) {
   }));
 }
 
-module.exports = { router, getFullSurvey, buildResults, getQuestionsWithOptions, normalizePhone };
+module.exports = { router, getFullSurvey, buildResults, getQuestionsWithOptions, normalizePhone, getActiveSurveyCached };

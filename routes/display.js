@@ -52,14 +52,18 @@ router.get('/status', async (req, res) => {
   }
 
   if (survey.status === 'active') {
+    const surveyType = survey.type === 'contest' ? 'contest' : 'regular';
     const questions = await getQuestionsWithOptions(survey.id);
-    // For a single-screen live view we show the first question + live response count.
-    // (Survey currently supports one screen state; extend here if you want per-question live view.)
+    // For a single-screen live view we show the first question + live response count,
+    // but never the per-option breakdown — this is deliberate for BOTH survey types:
+    // nobody (contest or regular) should be able to see how the vote is trending
+    // before it closes. Only survey_type changes what happens at reveal time.
     const firstQuestion = questions[0];
     const responsesSnap = await db.collection('responses').where('surveyId', '==', survey.id).get();
 
     return res.json({
       status: 'active',
+      survey_type: surveyType,
       survey_title: survey.title,
       question: firstQuestion ? firstQuestion.text : null,
       options: firstQuestion ? firstQuestion.options : [],
@@ -68,10 +72,19 @@ router.get('/status', async (req, res) => {
   }
 
   // closed
+  const results = await buildResults(survey.id);
+  const surveyType = survey.type === 'contest' ? 'contest' : 'regular';
+  if (surveyType === 'contest') {
+    // Sort options within each question by vote count so the final reveal reads
+    // as a ranked leaderboard, winner first.
+    results.forEach(q => q.options.sort((a, b) => b.count - a.count));
+  }
+
   return res.json({
     status: 'closed',
+    survey_type: surveyType,
     survey_title: survey.title,
-    results: await buildResults(survey.id)
+    results
   });
 });
 

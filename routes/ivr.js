@@ -1,6 +1,6 @@
 const express = require('express');
 const { db, FieldValue } = require('../db');
-const { normalizePhone, getQuestionsWithOptions } = require('./admin');
+const { normalizePhone, getActiveSurveyCached } = require('./admin');
 
 const router = express.Router();
 
@@ -47,7 +47,14 @@ function answerVarName(questionId) {
 // states the question, then reads each option as "לבחירת X הקישו Y" —
 // easier to follow on a phone than "הקישו Y לבחירה ב X", especially for
 // someone who's never used this system before.
-function buildQuestionPrompt(question) {
+// Contest-type surveys ("who wins") get a livelier, vote-flavored phrasing instead.
+function buildQuestionPrompt(question, surveyType) {
+  if (surveyType === 'contest') {
+    const optionsText = question.options
+      .map(o => `להצבעה ל${o.text} הקישו ${o.digit}`)
+      .join(' ');
+    return `${question.text} מי המנצח לדעתכם ${optionsText}`;
+  }
   const optionsText = question.options
     .map(o => `לבחירת ${o.text} הקישו ${o.digit}`)
     .join(' ');
@@ -73,13 +80,20 @@ router.all('/survey', async (req, res) => {
 
     const phone = normalizePhone(rawPhone);
 
-    const surveySnap = await db.collection('surveys').where('status', '==', 'active').limit(1).get();
-    if (surveySnap.empty) {
+    // Active survey + its questions/options come from an in-memory cache (see
+    // admin.js) instead of Firestore — that data can't change while a survey is
+    // active, so re-fetching it on every call would just waste the free server's
+    // very limited CPU. Only the user lookup genuinely needs a fresh read every time.
+    const [activeSurvey, userDoc] = await Promise.all([
+      getActiveSurveyCached(),
+      db.collection('users').doc(phone).get()
+    ]);
+
+    if (!activeSurvey) {
       return res.send(buildMessage('אין כרגע סקר פעיל תודה'));
     }
-    const surveyId = surveySnap.docs[0].id;
+    const { id: surveyId, type: surveyType, questions } = activeSurvey;
 
-    const userDoc = await db.collection('users').doc(phone).get();
     if (!userDoc.exists) {
       return res.send(buildMessage('אינך רשום למענה לסקר זה'));
     }
@@ -93,8 +107,6 @@ router.all('/survey', async (req, res) => {
       return res.send(buildMessage('כבר ענית על סקר זה תודה'));
     }
 
-    const questions = await getQuestionsWithOptions(surveyId);
-
     // Find the first question that doesn't yet have an answer in the accumulated params.
     const nextQuestion = questions.find(q => {
       const val = params[answerVarName(q.id)];
@@ -102,7 +114,7 @@ router.all('/survey', async (req, res) => {
     });
 
     if (nextQuestion) {
-      return res.send(buildReadCommand(buildQuestionPrompt(nextQuestion), answerVarName(nextQuestion.id)));
+      return res.send(buildReadCommand(buildQuestionPrompt(nextQuestion, surveyType), answerVarName(nextQuestion.id)));
     }
 
     // All questions answered -> validate digits, save, and finish.
@@ -112,7 +124,7 @@ router.all('/survey', async (req, res) => {
       const option = q.options.find(o => o.digit === digit);
       if (!option) {
         // Invalid/garbled input somewhere — safest is to ask the question again.
-        return res.send(buildReadCommand(buildQuestionPrompt(q), answerVarName(q.id)));
+        return res.send(buildReadCommand(buildQuestionPrompt(q, surveyType), answerVarName(q.id)));
       }
       answerPairs.push({ questionId: q.id, optionId: option.id });
     }
@@ -133,7 +145,11 @@ router.all('/survey', async (req, res) => {
       return res.send(buildMessage('כבר ענית על סקר זה תודה'));
     }
 
-    return res.send(buildMessage('תודה תשובתך נקלטה ונשמרה במערכת בהצלחה'));
+    return res.send(buildMessage(
+      surveyType === 'contest'
+        ? 'תודה ההצבעה שלך נספרה בהצלחה'
+        : 'תודה תשובתך נקלטה ונשמרה במערכת בהצלחה'
+    ));
   } catch (err) {
     console.error('IVR /survey unexpected error:', err);
     return res.send(buildMessage('אירעה שגיאה טכנית נסו שוב מאוחר יותר'));

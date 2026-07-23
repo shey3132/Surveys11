@@ -101,6 +101,38 @@
     outline:2px solid var(--line-green);
     outline-offset:1px;
   }
+  .type-toggle{
+    display:grid;
+    grid-template-columns:1fr 1fr;
+    gap:10px;
+    margin-top:6px;
+  }
+  .type-option{
+    display:block;
+    border:1px solid #d8d2c0;
+    border-radius:8px;
+    padding:12px 14px;
+    cursor:pointer;
+    background:#fdfcf9;
+    transition:border-color .15s, background .15s;
+  }
+  .type-option:has(input:checked){
+    border-color:var(--line-green);
+    background:#eef4f0;
+  }
+  .type-option input{
+    margin-left:8px;
+  }
+  .type-option-body strong{
+    font-size:14px;
+  }
+  .type-option-body small{
+    display:block;
+    color:var(--muted);
+    font-size:12px;
+    margin-top:4px;
+    line-height:1.4;
+  }
   .question-block{
     border:1px dashed #cfc8b3;
     border-radius:8px;
@@ -230,6 +262,24 @@
     <label>תיאור (אופציונלי)</label>
     <textarea id="surveyDesc" rows="2" placeholder="תיאור קצר..."></textarea>
 
+    <label>סוג הסקר</label>
+    <div class="type-toggle">
+      <label class="type-option">
+        <input type="radio" name="surveyType" value="regular" checked>
+        <span class="type-option-body">
+          <strong>📊 רגיל</strong>
+          <small>סקר דעת קהל / שביעות רצון - התוצאות מוסתרות עד לסגירת הסקר</small>
+        </span>
+      </label>
+      <label class="type-option">
+        <input type="radio" name="surveyType" value="contest">
+        <span class="type-option-body">
+          <strong>🏆 תחרות מנצחים</strong>
+          <small>הצבעה בין מתמודדים - טבלת מובילים חיה מוצגת במסך התצוגה כבר תוך כדי ההצבעה</small>
+        </span>
+      </label>
+    </div>
+
     <div id="questionsWrap"></div>
 
     <div class="row-actions">
@@ -355,6 +405,7 @@ addQuestion(); // start with one question
 document.getElementById('createSurveyBtn').addEventListener('click', async () => {
   const title = document.getElementById('surveyTitle').value.trim();
   const description = document.getElementById('surveyDesc').value.trim();
+  const type = document.querySelector('input[name="surveyType"]:checked').value;
   const createMsg = document.getElementById('createMsg');
 
   const questions = [];
@@ -373,13 +424,14 @@ document.getElementById('createSurveyBtn').addEventListener('click', async () =>
     const res = await fetch(API + '/admin/surveys', {
       method:'POST',
       headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({ title, description, questions })
+      body: JSON.stringify({ title, description, type, questions })
     });
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || 'שגיאה');
     showMsg(createMsg, `הסקר "${data.title}" נוצר בהצלחה (טיוטה)`, true);
     document.getElementById('surveyTitle').value = '';
     document.getElementById('surveyDesc').value = '';
+    document.querySelector('input[name="surveyType"][value="regular"]').checked = true;
     questionsWrap.innerHTML = '';
     qCounter = 0;
     addQuestion();
@@ -406,7 +458,7 @@ async function loadSurveys(){
       const tr = document.createElement('tr');
       tr.className = 'survey-row';
       tr.innerHTML = `
-        <td>${escapeHtml(s.title)}</td>
+        <td>${escapeHtml(s.title)} ${s.type === 'contest' ? '<span title="תחרות מנצחים">🏆</span>' : ''}</td>
         <td><span class="status-pill status-${s.status}">${statusLabels[s.status]}</span></td>
         <td class="actions-cell"></td>
       `;
