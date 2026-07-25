@@ -53,13 +53,17 @@ router.get('/status', async (req, res) => {
 
   if (survey.status === 'active') {
     const surveyType = survey.type === 'contest' ? 'contest' : 'regular';
-    const questions = await getQuestionsWithOptions(survey.id);
+    // Fetched in parallel: the question/options never change here, and the count
+    // query below only needs a number, not the documents themselves.
+    const [questions, countSnap] = await Promise.all([
+      getQuestionsWithOptions(survey.id),
+      db.collection('responses').where('surveyId', '==', survey.id).count().get()
+    ]);
     // For a single-screen live view we show the first question + live response count,
     // but never the per-option breakdown — this is deliberate for BOTH survey types:
     // nobody (contest or regular) should be able to see how the vote is trending
     // before it closes. Only survey_type changes what happens at reveal time.
     const firstQuestion = questions[0];
-    const responsesSnap = await db.collection('responses').where('surveyId', '==', survey.id).get();
 
     return res.json({
       status: 'active',
@@ -67,7 +71,7 @@ router.get('/status', async (req, res) => {
       survey_title: survey.title,
       question: firstQuestion ? firstQuestion.text : null,
       options: firstQuestion ? firstQuestion.options : [],
-      response_count: responsesSnap.size
+      response_count: countSnap.data().count
     });
   }
 
