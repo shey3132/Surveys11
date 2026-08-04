@@ -1,7 +1,8 @@
 const express = require('express');
 const multer = require('multer');
 const xlsx = require('xlsx');
-const { db, FieldValue } = require('../db');
+const { db, newId } = require('../db');
+const { ServerValue } = require('firebase-admin/database');
 
 const router = express.Router();
 const upload = multer({ storage: multer.memoryStorage() });
@@ -24,19 +25,15 @@ function normalizePhone(raw) {
   return digits;
 }
 
-// Firestore Timestamps don't serialize to plain JSON nicely — convert to ISO
-// strings (matching what the frontend already expects) wherever we send one out.
+// RTDB timestamps (ServerValue.TIMESTAMP) come back as plain millisecond numbers.
 function tsToIso(ts) {
-  return ts && typeof ts.toDate === 'function' ? ts.toDate().toISOString() : null;
+  return ts ? new Date(ts).toISOString() : null;
 }
 
 // ---------- Active survey cache ----------
 // A survey's questions/options never change once it's active (editing is only
-// allowed in 'draft'), so re-fetching them from Firestore on every single IVR
-// call is pure waste — this is the single biggest cost on the hot call path,
-// and the free Render instance has very little CPU to spend re-doing it.
-// Cached in memory, invalidated only when a survey is activated or closed
-// (the only two actions that can change "what the active survey is").
+// allowed in 'draft'), so re-fetching them on every single IVR call is pure
+// waste. Cached in memory, invalidated only when a survey is activated or closed.
 let activeSurveyCache = null; // { id, type, questions } | null
 
 function invalidateActiveSurveyCache() {
@@ -45,43 +42,30 @@ function invalidateActiveSurveyCache() {
 
 async function getActiveSurveyCached() {
   if (activeSurveyCache) return activeSurveyCache;
-  const snap = await db.collection('surveys').where('status', '==', 'active').limit(1).get();
-  if (snap.empty) return null;
-  const doc = snap.docs[0];
-  const questions = await getQuestionsWithOptions(doc.id);
+  const idSnap = await db.ref('meta/activeSurveyId').get();
+  const activeId = idSnap.val();
+  if (!activeId) return null;
+  const snap = await db.ref(`surveys/${activeId}`).get();
+  if (!snap.exists()) return null;
+  const data = snap.val();
+  if (data.status !== 'active') return null; // stale pointer safety check
   activeSurveyCache = {
-    id: doc.id,
-    type: doc.data().type === 'contest' ? 'contest' : 'regular',
-    questions
+    id: activeId,
+    type: data.type === 'contest' ? 'contest' : 'regular',
+    questions: parseQuestions(data.questions, activeId)
   };
   return activeSurveyCache;
 }
 
 // ---------- Closed-survey results cache ----------
-// Once a survey is closed, its responses are frozen forever — activate explicitly
-// refuses to reopen a closed survey, so nothing can ever add/change a response
-// after closing. That makes it safe to compute the tallied results exactly once
-// and reuse them forever, instead of re-reading every response document on every
-// single display-screen poll (every 2 seconds, for as long as the results stay
-// on screen) or every admin "results" click.
+// Once a survey is closed, its responses are frozen forever, so it's safe to
+// compute results exactly once and reuse them, instead of re-reading every
+// response on every single display-screen poll (every 2 seconds).
 const closedResultsCache = {};
-
-// Deletes every document in a top-level collection (no subcollections),
-// in batches of 500 (Firestore's per-batch write limit).
-async function deleteAllDocs(collectionRef) {
-  const snap = await collectionRef.get();
-  const docs = snap.docs;
-  for (let i = 0; i < docs.length; i += 500) {
-    const batch = db.batch();
-    docs.slice(i, i + 500).forEach(d => batch.delete(d.ref));
-    await batch.commit();
-  }
-}
 
 // ---------- USERS ----------
 
 // POST /admin/users/upload  (multipart/form-data, field name "file")
-// Expects an Excel file with columns: phone, name (header names are case-insensitive)
 router.post('/users/upload', upload.single('file'), async (req, res) => {
   if (!req.file) return res.status(400).json({ error: 'לא הועלה קובץ (שדה "file")' });
 
@@ -111,26 +95,17 @@ router.post('/users/upload', upload.single('file'), async (req, res) => {
 
   try {
     // Replacing the user list wipes any responses tied to the old users too —
-    // same cascade behavior as before (a response with no valid user makes no sense).
-    await deleteAllDocs(db.collection('users'));
-    await deleteAllDocs(db.collection('responses'));
+    // same cascade behavior as before.
+    await db.ref('users').remove();
+    await db.ref('responses').remove();
 
-    for (let i = 0; i < users.length; i += 500) {
-      const batch = db.batch();
-      users.slice(i, i + 500).forEach(u => {
-        // Document ID = phone number itself. This both gives us free O(1) lookup
-        // by phone (exactly what the IVR endpoint needs on every call) and makes
-        // "phone" naturally unique — two rows with the same number simply overwrite
-        // each other instead of creating duplicates.
-        const ref = db.collection('users').doc(u.phone);
-        batch.set(ref, {
-          phone: u.phone,
-          name: u.name || null,
-          createdAt: FieldValue.serverTimestamp()
-        });
-      });
-      await batch.commit();
-    }
+    const updates = {};
+    users.forEach(u => {
+      updates[`users/${u.phone}/phone`] = u.phone;
+      updates[`users/${u.phone}/name`] = u.name || null;
+      updates[`users/${u.phone}/createdAt`] = ServerValue.TIMESTAMP;
+    });
+    await db.ref().update(updates);
   } catch (err) {
     return res.status(500).json({ error: 'שגיאה בשמירת המשתמשים', details: err.message });
   }
@@ -139,51 +114,58 @@ router.post('/users/upload', upload.single('file'), async (req, res) => {
 });
 
 router.get('/users', async (req, res) => {
-  const snap = await db.collection('users').orderBy('phone').get();
-  const users = snap.docs.map(d => {
-    const data = d.data();
-    return { id: d.id, phone: data.phone, name: data.name, created_at: tsToIso(data.createdAt) };
-  });
+  const snap = await db.ref('users').get();
+  const val = snap.val() || {};
+  const users = Object.values(val)
+    .map(u => ({ phone: u.phone, name: u.name, created_at: tsToIso(u.createdAt) }))
+    .sort((a, b) => a.phone.localeCompare(b.phone));
   res.json(users);
 });
 
 // ---------- SURVEYS ----------
 
-// Fetches a survey's questions (ordered) with each question's options (ordered) nested in.
-async function getQuestionsWithOptions(surveyId) {
-  const qSnap = await db.collection('surveys').doc(surveyId).collection('questions')
-    .orderBy('sortOrder').get();
-
-  const questions = await Promise.all(qSnap.docs.map(async qDoc => {
-    const qData = qDoc.data();
-    const oSnap = await qDoc.ref.collection('options').orderBy('sortOrder').get();
-    const options = oSnap.docs.map(oDoc => {
-      const oData = oDoc.data();
-      return { id: oDoc.id, text: oData.text, digit: oData.digit };
-    });
-    return { id: qDoc.id, survey_id: surveyId, text: qData.text, sort_order: qData.sortOrder, options };
-  }));
-  return questions;
+// Converts the raw nested `questions` object stored under a survey into the
+// same sorted-array shape the rest of the app (and the frontend) expects.
+function parseQuestions(rawQuestions, surveyId) {
+  if (!rawQuestions) return [];
+  return Object.entries(rawQuestions)
+    .map(([qid, q]) => {
+      const options = q.options
+        ? Object.entries(q.options)
+            .map(([oid, o]) => ({ id: oid, text: o.text, digit: o.digit, sortOrder: o.sortOrder }))
+            .sort((a, b) => a.sortOrder - b.sortOrder)
+            .map(({ sortOrder, ...rest }) => rest)
+        : [];
+      return { id: qid, survey_id: surveyId, text: q.text, sort_order: q.sortOrder, options, sortOrder: q.sortOrder };
+    })
+    .sort((a, b) => a.sortOrder - b.sortOrder)
+    .map(({ sortOrder, ...rest }) => rest);
 }
 
-// Writes a full set of questions+options under a survey (used by both create and edit).
+async function getQuestionsWithOptions(surveyId) {
+  const snap = await db.ref(`surveys/${surveyId}/questions`).get();
+  return parseQuestions(snap.val(), surveyId);
+}
+
+// Writes a full set of questions+options under a survey as one atomic
+// multi-path update (used by both create and edit).
 async function writeQuestions(surveyId, questions) {
-  const surveyRef = db.collection('surveys').doc(surveyId);
-  const batch = db.batch();
+  const updates = {};
   questions.forEach((q, qIdx) => {
-    const qRef = surveyRef.collection('questions').doc();
-    batch.set(qRef, { text: q.text, sortOrder: qIdx });
+    const qid = newId(`surveys/${surveyId}/questions`);
+    updates[`surveys/${surveyId}/questions/${qid}/text`] = q.text;
+    updates[`surveys/${surveyId}/questions/${qid}/sortOrder`] = qIdx;
     q.options.forEach((optText, oIdx) => {
-      const oRef = qRef.collection('options').doc();
-      batch.set(oRef, { text: optText, digit: oIdx + 1, sortOrder: oIdx }); // digit = 1-based position
+      const oid = newId(`surveys/${surveyId}/questions/${qid}/options`);
+      updates[`surveys/${surveyId}/questions/${qid}/options/${oid}/text`] = optText;
+      updates[`surveys/${surveyId}/questions/${qid}/options/${oid}/digit`] = oIdx + 1; // digit = 1-based position
+      updates[`surveys/${surveyId}/questions/${qid}/options/${oid}/sortOrder`] = oIdx;
     });
   });
-  await batch.commit();
+  await db.ref().update(updates);
 }
 
 // POST /admin/surveys  { title, description, type, questions: [{ text, options: [text, text, ...] }] }
-// type: 'regular' (default, opinion/satisfaction poll — results hidden until closed) or
-//       'contest' (winner vote — live leaderboard shown while the survey is still active)
 router.post('/surveys', async (req, res) => {
   const { title, description, questions } = req.body;
   const type = req.body.type === 'contest' ? 'contest' : 'regular';
@@ -201,14 +183,13 @@ router.post('/surveys', async (req, res) => {
 
   let surveyId;
   try {
-    const surveyRef = db.collection('surveys').doc();
-    surveyId = surveyRef.id;
-    await surveyRef.set({
+    surveyId = newId('surveys');
+    await db.ref(`surveys/${surveyId}`).set({
       title,
       description: description || null,
       type,
       status: 'draft',
-      createdAt: FieldValue.serverTimestamp(),
+      createdAt: ServerValue.TIMESTAMP,
       activatedAt: null,
       closedAt: null
     });
@@ -222,10 +203,9 @@ router.post('/surveys', async (req, res) => {
 
 // PUT /admin/surveys/:id  - only allowed while status = draft. Same body shape as POST.
 router.put('/surveys/:id', async (req, res) => {
-  const surveyRef = db.collection('surveys').doc(req.params.id);
-  const surveyDoc = await surveyRef.get();
-  if (!surveyDoc.exists) return res.status(404).json({ error: 'סקר לא נמצא' });
-  const survey = surveyDoc.data();
+  const snap = await db.ref(`surveys/${req.params.id}`).get();
+  if (!snap.exists()) return res.status(404).json({ error: 'סקר לא נמצא' });
+  const survey = snap.val();
   if (survey.status !== 'draft') {
     return res.status(400).json({ error: 'ניתן לערוך רק סקר במצב draft' });
   }
@@ -242,9 +222,11 @@ router.put('/surveys/:id', async (req, res) => {
   }
 
   try {
-    await surveyRef.update({ title, description: description || null, type });
+    await db.ref(`surveys/${req.params.id}/title`).set(title);
+    await db.ref(`surveys/${req.params.id}/description`).set(description || null);
+    await db.ref(`surveys/${req.params.id}/type`).set(type);
     // Simplest correct approach: wipe and recreate questions/options for this survey.
-    await db.recursiveDelete(surveyRef.collection('questions'));
+    await db.ref(`surveys/${req.params.id}/questions`).remove();
     await writeQuestions(req.params.id, questions);
   } catch (err) {
     return res.status(500).json({ error: 'שגיאה בעריכת הסקר', details: err.message });
@@ -254,11 +236,13 @@ router.put('/surveys/:id', async (req, res) => {
 });
 
 router.get('/surveys', async (req, res) => {
-  const snap = await db.collection('surveys').orderBy('createdAt', 'desc').get();
-  const surveys = snap.docs.map(d => {
-    const data = d.data();
-    return {
-      id: d.id,
+  const snap = await db.ref('surveys').get();
+  const val = snap.val() || {};
+  const surveys = Object.entries(val)
+    .map(([id, data]) => ({ id, data }))
+    .sort((a, b) => (b.data.createdAt || 0) - (a.data.createdAt || 0))
+    .map(({ id, data }) => ({
+      id,
       title: data.title,
       description: data.description,
       type: data.type || 'regular',
@@ -266,8 +250,7 @@ router.get('/surveys', async (req, res) => {
       created_at: tsToIso(data.createdAt),
       activated_at: tsToIso(data.activatedAt),
       closed_at: tsToIso(data.closedAt)
-    };
-  });
+    }));
   res.json(surveys);
 });
 
@@ -279,24 +262,25 @@ router.get('/surveys/:id', async (req, res) => {
 
 // POST /admin/surveys/:id/activate  - closes any other active survey first
 router.post('/surveys/:id/activate', async (req, res) => {
-  const surveyRef = db.collection('surveys').doc(req.params.id);
-  const surveyDoc = await surveyRef.get();
-  if (!surveyDoc.exists) return res.status(404).json({ error: 'סקר לא נמצא' });
-  const survey = surveyDoc.data();
+  const snap = await db.ref(`surveys/${req.params.id}`).get();
+  if (!snap.exists()) return res.status(404).json({ error: 'סקר לא נמצא' });
+  const survey = snap.val();
   if (survey.status === 'closed') {
     return res.status(400).json({ error: 'לא ניתן להפעיל מחדש סקר שנסגר' });
   }
 
   try {
-    const activeSnap = await db.collection('surveys').where('status', '==', 'active').get();
-    const batch = db.batch();
-    activeSnap.docs.forEach(d => {
-      if (d.id !== req.params.id) {
-        batch.update(d.ref, { status: 'closed', closedAt: FieldValue.serverTimestamp() });
-      }
-    });
-    batch.update(surveyRef, { status: 'active', activatedAt: FieldValue.serverTimestamp() });
-    await batch.commit();
+    const activeIdSnap = await db.ref('meta/activeSurveyId').get();
+    const prevActiveId = activeIdSnap.val();
+    const updates = {};
+    if (prevActiveId && prevActiveId !== req.params.id) {
+      updates[`surveys/${prevActiveId}/status`] = 'closed';
+      updates[`surveys/${prevActiveId}/closedAt`] = ServerValue.TIMESTAMP;
+    }
+    updates[`surveys/${req.params.id}/status`] = 'active';
+    updates[`surveys/${req.params.id}/activatedAt`] = ServerValue.TIMESTAMP;
+    updates['meta/activeSurveyId'] = req.params.id;
+    await db.ref().update(updates);
     invalidateActiveSurveyCache();
   } catch (err) {
     return res.status(500).json({ error: 'שגיאה בהפעלת הסקר', details: err.message });
@@ -307,12 +291,23 @@ router.post('/surveys/:id/activate', async (req, res) => {
 
 // POST /admin/surveys/:id/close
 router.post('/surveys/:id/close', async (req, res) => {
-  const surveyRef = db.collection('surveys').doc(req.params.id);
-  const surveyDoc = await surveyRef.get();
-  if (!surveyDoc.exists) return res.status(404).json({ error: 'סקר לא נמצא' });
+  const snap = await db.ref(`surveys/${req.params.id}`).get();
+  if (!snap.exists()) return res.status(404).json({ error: 'סקר לא נמצא' });
 
-  await surveyRef.update({ status: 'closed', closedAt: FieldValue.serverTimestamp() });
-  invalidateActiveSurveyCache();
+  try {
+    const updates = {
+      [`surveys/${req.params.id}/status`]: 'closed',
+      [`surveys/${req.params.id}/closedAt`]: ServerValue.TIMESTAMP
+    };
+    const activeIdSnap = await db.ref('meta/activeSurveyId').get();
+    if (activeIdSnap.val() === req.params.id) {
+      updates['meta/activeSurveyId'] = null;
+    }
+    await db.ref().update(updates);
+    invalidateActiveSurveyCache();
+  } catch (err) {
+    return res.status(500).json({ error: 'שגיאה בסגירת הסקר', details: err.message });
+  }
 
   res.json(await getFullSurvey(req.params.id));
 });
@@ -320,24 +315,16 @@ router.post('/surveys/:id/close', async (req, res) => {
 // ---------- DISPLAY SCREEN ----------
 
 // POST /admin/display/clear
-// The display screen shows the most recently closed survey's results by default,
-// indefinitely, until a new survey is activated. This lets an admin manually send
-// it back to the idle "waiting" screen without needing to touch survey state.
-// Implemented as a timestamp rather than a delete: display.js only shows a closed
-// survey's results if that survey closed *after* the last clear — so results from
-// a survey closed later (even accidentally, e.g. re-closing) still surface normally.
 router.post('/display/clear', async (req, res) => {
-  await db.collection('meta').doc('display').set({
-    clearedAt: FieldValue.serverTimestamp()
-  });
+  await db.ref('meta/display/clearedAt').set(ServerValue.TIMESTAMP);
   res.json({ ok: true });
 });
 
 // GET /admin/surveys/:id/results  - counts/percentages only
 router.get('/surveys/:id/results', async (req, res) => {
-  const surveyDoc = await db.collection('surveys').doc(req.params.id).get();
-  if (!surveyDoc.exists) return res.status(404).json({ error: 'סקר לא נמצא' });
-  const survey = surveyDoc.data();
+  const snap = await db.ref(`surveys/${req.params.id}`).get();
+  if (!snap.exists()) return res.status(404).json({ error: 'סקר לא נמצא' });
+  const survey = snap.val();
 
   res.json({
     survey_id: req.params.id,
@@ -350,10 +337,9 @@ router.get('/surveys/:id/results', async (req, res) => {
 // ---------- helpers (also used by ivr.js / display.js) ----------
 
 async function getFullSurvey(surveyId) {
-  const surveyDoc = await db.collection('surveys').doc(surveyId).get();
-  if (!surveyDoc.exists) return null;
-  const data = surveyDoc.data();
-  const questions = await getQuestionsWithOptions(surveyId);
+  const snap = await db.ref(`surveys/${surveyId}`).get();
+  if (!snap.exists()) return null;
+  const data = snap.val();
   return {
     id: surveyId,
     title: data.title,
@@ -363,7 +349,7 @@ async function getFullSurvey(surveyId) {
     created_at: tsToIso(data.createdAt),
     activated_at: tsToIso(data.activatedAt),
     closed_at: tsToIso(data.closedAt),
-    questions
+    questions: parseQuestions(data.questions, surveyId)
   };
 }
 
@@ -373,19 +359,17 @@ async function buildResults(surveyId, options = {}) {
     return closedResultsCache[surveyId];
   }
 
-  // Small-scale app (single active survey, modest response counts) — reading every
-  // response doc for this survey and tallying in memory is simpler and safer than
-  // maintaining running counters, and avoids any Firestore composite-index concerns.
-  const [questions, responsesSnap] = await Promise.all([
-    getQuestionsWithOptions(surveyId),
-    db.collection('responses').where('surveyId', '==', surveyId).get()
+  const [questionsSnap, responsesSnap] = await Promise.all([
+    db.ref(`surveys/${surveyId}/questions`).get(),
+    db.ref(`responses/${surveyId}`).get()
   ]);
-  const totalResponses = responsesSnap.size;
+  const questions = parseQuestions(questionsSnap.val(), surveyId);
+  const responsesVal = responsesSnap.val() || {};
+  const totalResponses = Object.keys(responsesVal).length;
 
   const countByOption = {};
-  responsesSnap.docs.forEach(d => {
-    const answers = d.data().answers || [];
-    answers.forEach(a => {
+  Object.values(responsesVal).forEach(r => {
+    (r.answers || []).forEach(a => {
       countByOption[a.optionId] = (countByOption[a.optionId] || 0) + 1;
     });
   });

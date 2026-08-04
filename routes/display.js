@@ -7,43 +7,31 @@ const router = express.Router();
 // GET /display/status
 // Poll this every ~2s from the main screen.
 router.get('/status', async (req, res) => {
-  // Two separate simple equality queries (rather than one status-in query with an
-  // orderBy) — this keeps every query here a single-field filter, which Firestore
-  // always indexes automatically, so nothing here can ever hit a missing-composite-
-  // index error in production.
-  const activeSnap = await db.collection('surveys').where('status', '==', 'active').limit(1).get();
+  const activeIdSnap = await db.ref('meta/activeSurveyId').get();
+  const activeId = activeIdSnap.val();
 
   let survey = null;
-  if (!activeSnap.empty) {
-    survey = { id: activeSnap.docs[0].id, ...activeSnap.docs[0].data() };
+  if (activeId) {
+    const snap = await db.ref(`surveys/${activeId}`).get();
+    if (snap.exists()) survey = { id: activeId, ...snap.val() };
   } else {
-    const closedSnap = await db.collection('surveys').where('status', '==', 'closed').get();
-    if (!closedSnap.empty) {
-      // Small number of surveys expected — sorting in memory avoids needing a
-      // composite index for "where status == closed order by closedAt desc".
-      const docs = closedSnap.docs
-        .map(d => ({ id: d.id, ...d.data() }))
-        .sort((a, b) => {
-          const at = a.closedAt && a.closedAt.toMillis ? a.closedAt.toMillis() : 0;
-          const bt = b.closedAt && b.closedAt.toMillis ? b.closedAt.toMillis() : 0;
-          return bt - at;
-        });
-      survey = docs[0];
-    }
+    // No active survey — show the most recently closed one, if any.
+    const allSnap = await db.ref('surveys').get();
+    const val = allSnap.val() || {};
+    const closed = Object.entries(val)
+      .map(([id, data]) => ({ id, ...data }))
+      .filter(s => s.status === 'closed')
+      .sort((a, b) => (b.closedAt || 0) - (a.closedAt || 0));
+    survey = closed[0] || null;
   }
 
   // If the admin hit "נקה מסך" after this survey closed, show idle instead of
-  // its results — but a survey closed *after* that clear still shows normally,
-  // so this never masks a genuinely new result.
+  // its results — but a survey closed *after* that clear still shows normally.
   if (survey && survey.status === 'closed') {
-    const metaDoc = await db.collection('meta').doc('display').get();
-    if (metaDoc.exists) {
-      const clearedAt = metaDoc.data().clearedAt;
-      const clearedMs = clearedAt && clearedAt.toMillis ? clearedAt.toMillis() : 0;
-      const closedMs = survey.closedAt && survey.closedAt.toMillis ? survey.closedAt.toMillis() : 0;
-      if (clearedMs >= closedMs) {
-        survey = null;
-      }
+    const clearedSnap = await db.ref('meta/display/clearedAt').get();
+    const clearedAt = clearedSnap.val() || 0;
+    if (clearedAt >= (survey.closedAt || 0)) {
+      survey = null;
     }
   }
 
@@ -53,17 +41,10 @@ router.get('/status', async (req, res) => {
 
   if (survey.status === 'active') {
     const surveyType = survey.type === 'contest' ? 'contest' : 'regular';
-    // Fetched in parallel: the question/options never change here, and the count
-    // query below only needs a number, not the documents themselves.
-    const [questions, countSnap] = await Promise.all([
-      getQuestionsWithOptions(survey.id),
-      db.collection('responses').where('surveyId', '==', survey.id).count().get()
-    ]);
-    // For a single-screen live view we show the first question + live response count,
-    // but never the per-option breakdown — this is deliberate for BOTH survey types:
-    // nobody (contest or regular) should be able to see how the vote is trending
-    // before it closes. Only survey_type changes what happens at reveal time.
+    const questions = await getQuestionsWithOptions(survey.id);
     const firstQuestion = questions[0];
+    const respSnap = await db.ref(`responses/${survey.id}`).get();
+    const responseCount = respSnap.exists() ? Object.keys(respSnap.val()).length : 0;
 
     return res.json({
       status: 'active',
@@ -71,17 +52,13 @@ router.get('/status', async (req, res) => {
       survey_title: survey.title,
       question: firstQuestion ? firstQuestion.text : null,
       options: firstQuestion ? firstQuestion.options : [],
-      response_count: countSnap.data().count
+      response_count: responseCount
     });
   }
 
   // closed
-  const results = await buildResults(survey.id);
+  const results = await buildResults(survey.id, { cacheable: true });
   const surveyType = survey.type === 'contest' ? 'contest' : 'regular';
-  // Deliberately NOT sorted by vote count: card position is fixed at entry order
-  // for both survey types, so the winner isn't given away by where their card
-  // sits before the reveal animation even starts. The frontend crowns the
-  // actual leader dynamically, only after every card finishes counting up.
 
   return res.json({
     status: 'closed',
