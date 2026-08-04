@@ -8,7 +8,20 @@ const upload = multer({ storage: multer.memoryStorage() });
 
 // Normalize a phone number: keep digits only (strip spaces, dashes, +972 etc. left as-is for now)
 function normalizePhone(raw) {
-  return String(raw).trim().replace(/[^\d]/g, '');
+  const digits = String(raw).trim().replace(/[^\d]/g, '');
+  // Spreadsheet tools (especially CSV, which has no per-cell text formatting)
+  // often treat a phone number like "0527673132" as a plain number and silently
+  // drop the leading zero. That single missing digit means real callers — whose
+  // caller ID always arrives with the leading 0 — would never match anyone in an
+  // uploaded list. Restoring it here fixes the problem at the source, regardless
+  // of whether it came from a .csv, a .xlsx with unformatted cells, or elsewhere.
+  // Covers both cases this produces:
+  //   10-digit mobile (05X-XXXXXXX) → stripped to 9 digits, e.g. 527673132
+  //   9-digit landline (0X-XXXXXXX) → stripped to 8 digits, e.g. 29998481
+  if ((digits.length === 9 || digits.length === 8) && !digits.startsWith('0')) {
+    return '0' + digits;
+  }
+  return digits;
 }
 
 // Firestore Timestamps don't serialize to plain JSON nicely — convert to ISO
@@ -43,6 +56,15 @@ async function getActiveSurveyCached() {
   };
   return activeSurveyCache;
 }
+
+// ---------- Closed-survey results cache ----------
+// Once a survey is closed, its responses are frozen forever — activate explicitly
+// refuses to reopen a closed survey, so nothing can ever add/change a response
+// after closing. That makes it safe to compute the tallied results exactly once
+// and reuse them forever, instead of re-reading every response document on every
+// single display-screen poll (every 2 seconds, for as long as the results stay
+// on screen) or every admin "results" click.
+const closedResultsCache = {};
 
 // Deletes every document in a top-level collection (no subcollections),
 // in batches of 500 (Firestore's per-batch write limit).
@@ -321,7 +343,7 @@ router.get('/surveys/:id/results', async (req, res) => {
     survey_id: req.params.id,
     title: survey.title,
     status: survey.status,
-    questions: await buildResults(req.params.id)
+    questions: await buildResults(req.params.id, { cacheable: survey.status === 'closed' })
   });
 });
 
@@ -345,7 +367,12 @@ async function getFullSurvey(surveyId) {
   };
 }
 
-async function buildResults(surveyId) {
+async function buildResults(surveyId, options = {}) {
+  const { cacheable = false } = options;
+  if (cacheable && closedResultsCache[surveyId]) {
+    return closedResultsCache[surveyId];
+  }
+
   // Small-scale app (single active survey, modest response counts) — reading every
   // response doc for this survey and tallying in memory is simpler and safer than
   // maintaining running counters, and avoids any Firestore composite-index concerns.
@@ -363,7 +390,7 @@ async function buildResults(surveyId) {
     });
   });
 
-  return questions.map(q => ({
+  const results = questions.map(q => ({
     question: q.text,
     options: q.options.map(o => {
       const count = countByOption[o.id] || 0;
@@ -371,6 +398,9 @@ async function buildResults(surveyId) {
       return { text: o.text, count, percent };
     })
   }));
+
+  if (cacheable) closedResultsCache[surveyId] = results;
+  return results;
 }
 
 module.exports = { router, getFullSurvey, buildResults, getQuestionsWithOptions, normalizePhone, getActiveSurveyCached };
